@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from loguru import logger
 import joblib
+import time
 
 from sentence_transformers import SentenceTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -14,7 +15,7 @@ GLOBAL_CONFIG = {
             "sentence_transformer_embedding_dim": 768
         },
         "classifier": {
-            "serialized_model_path": "./data/news_classifier.joblib"
+            "serialized_model_path": "../data/news_classifier.joblib"
         }
     },
     "service": {
@@ -59,8 +60,12 @@ class NewsCategoryClassifier:
         1. Load the sentence transformer model and initialize the `featurizer` of type `TransformerFeaturizer` (Hint: revisit Week 1 Step 4)
         2. Load the serialized model as defined in GLOBAL_CONFIG['model'] into memory and initialize `model`
         """
-        featurizer = None
-        model = None
+        sentence_transformer_model = SentenceTransformer('sentence-transformers/{model}'.format(model=config['model']['featurizer']['sentence_transformer_model']))
+        dim = config['model']['featurizer']['sentence_transformer_embedding_dim']
+
+        featurizer = TransformerFeaturizer(dim, sentence_transformer_model)
+        model = joblib.load(config['model']['classifier']['serialized_model_path'])
+       
         self.pipeline = Pipeline([
             ('transformer_featurizer', featurizer),
             ('classifier', model)
@@ -80,7 +85,10 @@ class NewsCategoryClassifier:
             ...
         }
         """
-        return {}
+        pred_proba = self.pipeline.predict_proba(model_input)[0]
+        class_names = self.pipeline.classes_
+
+        return dict(zip(class_names, pred_proba))
 
     def predict_label(self, model_input: dict) -> str:
         """
@@ -91,7 +99,7 @@ class NewsCategoryClassifier:
 
         Output format: predicted label for the model input
         """
-        return ""
+        return self.pipeline.predict(model_input)[0]
 
 
 app = FastAPI()
@@ -106,6 +114,10 @@ def startup_event():
         Access to the model instance and log file will be needed in /predict endpoint, make sure you
         store them as global variables
     """
+    global classifier
+    classifier = NewsCategoryClassifier(GLOBAL_CONFIG)
+
+    logger.add(GLOBAL_CONFIG['service']['log_destination'], level='DEBUG', rotation='1 day')
     logger.info("Setup completed")
 
 
@@ -137,7 +149,21 @@ def predict(request: PredictRequest):
         }
         3. Construct an instance of `PredictResponse` and return
     """
-    return {}
+    start = time.perf_counter()
+
+    pred_proba = classifier.predict_proba(request.description)
+    scores_sorted = dict(sorted(pred_proba.items(), key=lambda x: x[1], reverse=True))
+    label = max(pred_proba, key=pred_proba.get)
+
+    end = time.perf_counter()
+    latency = (end-start)*1000
+
+    logger.debug({
+        'request': request,
+        'prediction': PredictResponse(scores=scores_sorted, label=label),
+        'latency': f'{latency:.3f} ms'})
+
+    return PredictResponse(scores=scores_sorted, label=label)
 
 
 @app.get("/")
